@@ -2,7 +2,6 @@ import streamlit as st
 import snowflake.connector
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from openai import OpenAI
 
 # ── Page config ──────────────────────────────────────────
@@ -22,7 +21,7 @@ def check_password():
         st.markdown("Please enter the password to access this app.")
         password = st.text_input("Password", type="password")
         if st.button("Enter"):
-            if password == "medtronic2026":
+            if password == "medtech2025":
                 st.session_state.authenticated = True
                 st.rerun()
             else:
@@ -50,36 +49,44 @@ def get_snowflake_connection():
         warehouse=SNOWFLAKE_WAREHOUSE
     )
 
+def get_cursor():
+    """Get a fresh cursor, reconnecting if the session has expired"""
+    try:
+        conn = get_snowflake_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        return cursor
+    except Exception:
+        get_snowflake_connection.clear()
+        conn = get_snowflake_connection()
+        return conn.cursor()
+
 @st.cache_resource
 def get_openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
 
-conn   = get_snowflake_connection()
 client = get_openai_client()
 
 # ── Data loaders ─────────────────────────────────────────
-@st.cache_data
+@st.cache_data(ttl=3600)
 def load_financials():
-    df = pd.read_sql(
-        "SELECT * FROM MEDTECH_ANALYTICS.TRANSFORMED.VW_FINANCIALS_WIDE ORDER BY TICKER, YEAR",
-        conn
-    )
+    cursor = get_cursor()
+    cursor.execute("SELECT * FROM MEDTECH_ANALYTICS.TRANSFORMED.VW_FINANCIALS_WIDE ORDER BY TICKER, YEAR")
+    df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
     return df
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def load_growth():
-    df = pd.read_sql(
-        "SELECT * FROM MEDTECH_ANALYTICS.TRANSFORMED.VW_REVENUE_GROWTH ORDER BY TICKER, YEAR",
-        conn
-    )
+    cursor = get_cursor()
+    cursor.execute("SELECT * FROM MEDTECH_ANALYTICS.TRANSFORMED.VW_REVENUE_GROWTH ORDER BY TICKER, YEAR")
+    df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
     return df
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def load_benchmark():
-    df = pd.read_sql(
-        "SELECT * FROM MEDTECH_ANALYTICS.TRANSFORMED.VW_BENCHMARK_LATEST",
-        conn
-    )
+    cursor = get_cursor()
+    cursor.execute("SELECT * FROM MEDTECH_ANALYTICS.TRANSFORMED.VW_BENCHMARK_LATEST")
+    df = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
     return df
 
 financials = load_financials()
@@ -136,12 +143,13 @@ Based on the following data, write a 3 sentence variance narrative that:
 - Highlights any trend or risk worth noting
 
 IMPORTANT: Only use numbers that appear in the data below. Do not invent or estimate any figures.
+Do not use dollar signs — write currency as USD or spell out billions (e.g. 32.36 billion instead of $32.36B).
 
 Question: {question}
 Data:
 {data_str}
 
-Write in professional financial analyst style. No bullet points. Do not use dollar signs — write currency as USD or spell out billions (e.g. 32.36 billion instead of $32.36B).
+Write in professional financial analyst style. No bullet points.
 """
     response = client.chat.completions.create(
         model="gpt-4o",
@@ -152,16 +160,14 @@ Write in professional financial analyst style. No bullet points. Do not use doll
 
 def run_nl_query(question):
     sql = nl_to_sql(question)
-    cursor = conn.cursor()
+    cursor = get_cursor()
     cursor.execute(sql)
     df = pd.DataFrame(
         cursor.fetchall(),
         columns=[desc[0] for desc in cursor.description]
     )
-    # Check if OpenAI flagged the metric as unavailable
     if "ERROR" in df.columns and df["ERROR"].iloc[0] == "METRIC_NOT_AVAILABLE":
         raise ValueError("metric_not_available")
-    # Check if query returned no results
     if df.empty:
         raise ValueError("no_data")
     return df, sql
@@ -176,10 +182,10 @@ st.subheader("2025 Snapshot — Medtronic")
 mdt = benchmark[benchmark["TICKER"] == "MDT"].iloc[0]
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Revenue",           f"${mdt['REVENUE_B']}B")
-col2.metric("Operating Margin",  f"{mdt['OPERATING_MARGIN_PCT']}%")
-col3.metric("Net Income",        f"${mdt['NET_INCOME_B']}B")
-col4.metric("Net Margin",        f"{mdt['NET_MARGIN_PCT']}%")
+col1.metric("Revenue",          f"${mdt['REVENUE_B']}B")
+col2.metric("Operating Margin", f"{mdt['OPERATING_MARGIN_PCT']}%")
+col3.metric("Net Income",       f"${mdt['NET_INCOME_B']}B")
+col4.metric("Net Margin",       f"{mdt['NET_MARGIN_PCT']}%")
 
 st.divider()
 
@@ -194,7 +200,7 @@ with col_left:
         y="REVENUE_B",
         color="COMPANY",
         markers=True,
-        labels={"REVENUE_B": "Revenue ($B)", "YEAR": "Year", "COMPANY": "Company"}
+        labels={"REVENUE_B": "Revenue (USD B)", "YEAR": "Year", "COMPANY": "Company"}
     )
     fig_revenue.update_layout(legend=dict(orientation="h", yanchor="bottom", y=-0.3))
     st.plotly_chart(fig_revenue, use_container_width=True)
@@ -235,9 +241,9 @@ st.dataframe(
         "NET_INCOME_B", "OPERATING_MARGIN_PCT", "NET_MARGIN_PCT"
     ]].rename(columns={
         "COMPANY":              "Company",
-        "REVENUE_B":            "Revenue ($B)",
-        "OPERATING_INCOME_B":   "Op. Income ($B)",
-        "NET_INCOME_B":         "Net Income ($B)",
+        "REVENUE_B":            "Revenue (USD B)",
+        "OPERATING_INCOME_B":   "Op. Income (USD B)",
+        "NET_INCOME_B":         "Net Income (USD B)",
         "OPERATING_MARGIN_PCT": "Op. Margin %",
         "NET_MARGIN_PCT":       "Net Margin %"
     }),
@@ -255,41 +261,48 @@ st.caption("Available metrics: Revenue, Operating Income, Net Income, Operating 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+if "question_count" not in st.session_state:
+    st.session_state.question_count = 0
+
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("e.g. Which company had the highest operating margin in 2024?"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+if st.session_state.question_count >= 20:
+    st.warning("Question limit reached for this session.")
+else:
+    if prompt := st.chat_input("e.g. Which company had the highest operating margin in 2024?"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    with st.chat_message("assistant"):
-        with st.spinner("Querying Snowflake..."):
-            try:
-                df_result, sql_used = run_nl_query(prompt)
-                narrative = generate_narrative(prompt, df_result)
+        with st.chat_message("assistant"):
+            with st.spinner("Querying Snowflake..."):
+                try:
+                    df_result, sql_used = run_nl_query(prompt)
+                    narrative = generate_narrative(prompt, df_result)
 
-                st.markdown(narrative)
-                st.dataframe(df_result, use_container_width=True, hide_index=True)
+                    st.markdown(narrative)
+                    st.dataframe(df_result, use_container_width=True, hide_index=True)
 
-                with st.expander("View generated SQL"):
-                    st.code(sql_used, language="sql")
+                    with st.expander("View generated SQL"):
+                        st.code(sql_used, language="sql")
 
-                full_response = narrative
+                    full_response = narrative
+                    st.session_state.question_count += 1
 
-            except ValueError as e:
-                if "metric_not_available" in str(e):
-                    full_response = "That metric isn't available in our dataset. I have Revenue, Operating Income, Net Income, Operating Margin, Net Margin, and Revenue Growth for Medtronic, Boston Scientific, Abbott, and Stryker from 2021 to 2025."
-                else:
-                    full_response = "No data was found for that query. Try asking about revenue, operating margin, net income, or revenue growth for one of the four companies between 2021 and 2025."
-                st.warning(full_response)
+                except ValueError as e:
+                    if "metric_not_available" in str(e):
+                        full_response = "That metric is not available in our dataset. I have Revenue, Operating Income, Net Income, Operating Margin, Net Margin, and Revenue Growth for Medtronic, Boston Scientific, Abbott, and Stryker from 2021 to 2025."
+                    else:
+                        full_response = "No data was found for that query. Try asking about revenue, operating margin, net income, or revenue growth for one of the four companies between 2021 and 2025."
+                    st.warning(full_response)
 
-            except Exception as e:
-                full_response = f"Something went wrong: {str(e)}"
-                st.error(full_response)
+                except Exception as e:
+                    full_response = f"Something went wrong: {str(e)}"
+                    st.error(full_response)
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 # ── Footer ────────────────────────────────────────────────
 st.divider()
