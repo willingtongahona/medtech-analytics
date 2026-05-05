@@ -21,7 +21,7 @@ def check_password():
         st.markdown("Please enter the password to access this app.")
         password = st.text_input("Password", type="password")
         if st.button("Enter"):
-            if password == "medtech2025":
+            if password == "medtech2026":
                 st.session_state.authenticated = True
                 st.rerun()
             else:
